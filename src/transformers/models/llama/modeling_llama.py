@@ -847,7 +847,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             cache_position=cache_position,
             **kwargs,
         )
-
+        
         early_exit_layers = [
             0,
             1,
@@ -879,17 +879,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             27,
             28,
             29,
-            30,
-            31,
-            32,
-            33,
-            34,
-            35,
-            36,
-            37,
-            38,
-            39,
-            40,
+            30
         ]
 
         if early_exit_layers is not None:

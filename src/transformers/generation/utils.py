@@ -2254,7 +2254,7 @@ class GenerationMixin:
             # 12. run sample (it degenerates to greedy search when `generation_config.do_sample=False`)
             result = self._sample(
                 input_ids,
-                candidate_premature_layers=candi_candidate_premature_layers,
+                candidate_premature_layers=candidate_premature_layers,
                 logits_processor=prepared_logits_processor,
                 stopping_criteria=prepared_stopping_criteria,
                 generation_config=generation_config,
@@ -3253,10 +3253,10 @@ class GenerationMixin:
             model_inputs.update({"output_hidden_states": output_hidden_states} if output_hidden_states else {})
 
             if is_prefill:
-                outputs = self(**model_inputs, return_dict=True)
+                logits_dict, outputs = self(**model_inputs, return_dict=True)
                 is_prefill = False
             else:
-                outputs = model_forward(**model_inputs, return_dict=True)
+                logits_dict, outputs = model_forward(**model_inputs, return_dict=True)
 
             # synced_gpus: don't waste resources running the code we don't need; kwargs must be updated before skipping
             model_kwargs = self._update_model_kwargs_for_generation(
@@ -3295,7 +3295,7 @@ class GenerationMixin:
                         else (outputs.hidden_states,)
                     )
 
-            early_exit_layers = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
+            early_exit_layers = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,29,30]
 
             # pdb.set_trace()
 

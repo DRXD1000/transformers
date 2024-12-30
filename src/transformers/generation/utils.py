@@ -1907,6 +1907,7 @@ class GenerationMixin:
     def generate(
         self,
         inputs: Optional[torch.Tensor] = None,
+        candidate_premature_layers: list[int] | None = None,
         generation_config: Optional[GenerationConfig] = None,
         logits_processor: Optional[LogitsProcessorList] = None,
         stopping_criteria: Optional[StoppingCriteriaList] = None,
@@ -2253,6 +2254,7 @@ class GenerationMixin:
             # 12. run sample (it degenerates to greedy search when `generation_config.do_sample=False`)
             result = self._sample(
                 input_ids,
+                candidate_premature_layers=candi_candidate_premature_layers,
                 logits_processor=prepared_logits_processor,
                 stopping_criteria=prepared_stopping_criteria,
                 generation_config=generation_config,
@@ -3227,6 +3229,7 @@ class GenerationMixin:
 
         # keep track of which sequences are already finished
         batch_size, cur_len = input_ids.shape
+        hidden_token_cont = {}
         this_peer_finished = False
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
         model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
@@ -3292,6 +3295,24 @@ class GenerationMixin:
                         else (outputs.hidden_states,)
                     )
 
+            early_exit_layers = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
+
+            # pdb.set_trace()
+
+            if len(hidden_token_cont) == 0:
+                for _i, early_exit_layer in enumerate(early_exit_layers):
+                    logit = logits_dict[early_exit_layer]
+                    # hidden_token_cont[early_exit_layer] = torch.argmax(logit, dim=-1)
+                    topk_values, topk_indices = torch.topk(logit, 10, dim=-1)
+                    hidden_token_cont[early_exit_layer] = topk_indices.view(*topk_indices.shape[:-2], -1)
+            else:
+                for _i, early_exit_layer in enumerate(early_exit_layers):
+                    logit = logits_dict[early_exit_layer]
+                    # hidden_token_cont[early_exit_layer] = torch.cat([hidden_token_cont[early_exit_layer], torch.argmax(logit, dim=-1)], dim=-1)
+                    topk_values, topk_indices = torch.topk(logit, 10, dim=-1)
+                    hidden_token_cont[early_exit_layer] = torch.cat([hidden_token_cont[early_exit_layer], topk_indices.view(*topk_indices.shape[:-2], -1)], dim=-1)
+
+
             # token selection
             if do_sample:
                 probs = nn.functional.softmax(next_token_scores, dim=-1)
@@ -3343,7 +3364,7 @@ class GenerationMixin:
                     past_key_values=model_kwargs.get("past_key_values"),
                 )
         else:
-            return input_ids
+            return hidden_token_cont, input_ids
 
     def _temporary_reorder_cache(self, past_key_values, beam_idx):
         """

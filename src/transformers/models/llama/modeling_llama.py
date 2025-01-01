@@ -1173,8 +1173,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             cache_position=cache_position,
             **kwargs,
         )
-
-        early_exit_layers = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30]
+        
+        early_exit_layers = list(range(self.model.config.num_hidden_layers+1))#[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30]
 
         if early_exit_layers is not None:
             logits_dict = {}

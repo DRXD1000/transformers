@@ -1465,7 +1465,6 @@ class GenerationMixin:
         elif (
             model_input_name == "inputs_embeds"
             and input_ids_length != inputs_tensor.shape[1]
-            and input_ids_length != 0
             and not self.config.is_encoder_decoder
         ):
             generation_config.max_length -= inputs_tensor.shape[1]
@@ -1693,7 +1692,6 @@ class GenerationMixin:
             self._supports_cache_class
             and "jamba" not in self.__class__.__name__.lower()
             and "zamba" not in self.__class__.__name__.lower()
-            and "bamba" not in self.__class__.__name__.lower()
         )
 
     def _prepare_cache_for_generation(
@@ -1907,7 +1905,7 @@ class GenerationMixin:
     def generate(
         self,
         inputs: Optional[torch.Tensor] = None,
-        candidate_premature_layers: list[int] | None = None,
+        candidate_premature_layers: Optional[List[int]] = None,
         generation_config: Optional[GenerationConfig] = None,
         logits_processor: Optional[LogitsProcessorList] = None,
         stopping_criteria: Optional[StoppingCriteriaList] = None,
@@ -2254,12 +2252,12 @@ class GenerationMixin:
             # 12. run sample (it degenerates to greedy search when `generation_config.do_sample=False`)
             result = self._sample(
                 input_ids,
-                candidate_premature_layers=candidate_premature_layers,
                 logits_processor=prepared_logits_processor,
                 stopping_criteria=prepared_stopping_criteria,
                 generation_config=generation_config,
                 synced_gpus=synced_gpus,
                 streamer=streamer,
+                candidate_premature_layers=candidate_premature_layers,
                 **model_kwargs,
             )
 
@@ -3229,9 +3227,11 @@ class GenerationMixin:
 
         # keep track of which sequences are already finished
         batch_size, cur_len = input_ids.shape
-        hidden_token_cont = {}
         this_peer_finished = False
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
+
+        hidden_token_cont = {}
+
         model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
 
         model_forward = self.__call__
@@ -3295,18 +3295,16 @@ class GenerationMixin:
                         else (outputs.hidden_states,)
                     )
 
-            early_exit_layers = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,29,30]
-
-            # pdb.set_trace()
+            early_exit_layers = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30]
 
             if len(hidden_token_cont) == 0:
-                for _i, early_exit_layer in enumerate(early_exit_layers):
+                for i, early_exit_layer in enumerate(early_exit_layers):
                     logit = logits_dict[early_exit_layer]
                     # hidden_token_cont[early_exit_layer] = torch.argmax(logit, dim=-1)
                     topk_values, topk_indices = torch.topk(logit, 10, dim=-1)
                     hidden_token_cont[early_exit_layer] = topk_indices.view(*topk_indices.shape[:-2], -1)
             else:
-                for _i, early_exit_layer in enumerate(early_exit_layers):
+                for i, early_exit_layer in enumerate(early_exit_layers):
                     logit = logits_dict[early_exit_layer]
                     # hidden_token_cont[early_exit_layer] = torch.cat([hidden_token_cont[early_exit_layer], torch.argmax(logit, dim=-1)], dim=-1)
                     topk_values, topk_indices = torch.topk(logit, 10, dim=-1)
@@ -4282,10 +4280,9 @@ class GenerationMixin:
         while self._has_unfinished_sequences(this_peer_finished, synced_gpus, device=input_ids.device):
             cur_len = input_ids.shape[-1]
 
-            #  1. Fetch candidate sequences from a `CandidateGenerator` and move to the correct device
+            #  1. Fetch candidate sequences from a `CandidateGenerator`
             candidate_input_ids, candidate_logits = candidate_generator.get_candidates(input_ids)
 
-            candidate_input_ids = candidate_input_ids.to(self.device)
             if candidate_logits is not None:
                 candidate_logits = candidate_logits.to(self.device)
 

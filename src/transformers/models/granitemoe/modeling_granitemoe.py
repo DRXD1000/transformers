@@ -1283,6 +1283,7 @@ class GraniteMoeForCausalLM(GraniteMoePreTrainedModel, GenerationMixin):
     def get_decoder(self):
         return self.model
 
+
     @add_start_docstrings_to_model_forward(GRANITEMOE_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=MoeCausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
     def forward(
@@ -1299,6 +1300,7 @@ class GraniteMoeForCausalLM(GraniteMoePreTrainedModel, GenerationMixin):
         output_router_logits: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        candidate_premature_layers: Optional[List[int]] = None,
     ) -> Union[Tuple, MoeCausalLMOutputWithPast]:
         r"""
         Args:
@@ -1371,13 +1373,15 @@ class GraniteMoeForCausalLM(GraniteMoePreTrainedModel, GenerationMixin):
                 shift_labels = shift_labels.to(shift_logits.device)
                 loss = loss_fct(shift_logits, shift_labels)
                     # loss_dict[early_exit_layer] = loss
-                
-            final_outputs = CausalLMOutputWithPast(
+            aux_loss = None
+            final_outputs = MoeCausalLMOutputWithPast(
                 loss=loss,
+                aux_loss=aux_loss,
                 logits=logits,
                 past_key_values=outputs.past_key_values,
                 hidden_states=outputs.hidden_states,
                 attentions=outputs.attentions,
+                router_logits=outputs.router_logits,
             )
 
             return logits_dict, final_outputs

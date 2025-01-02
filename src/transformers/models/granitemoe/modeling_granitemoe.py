@@ -1343,57 +1343,91 @@ class GraniteMoeForCausalLM(GraniteMoePreTrainedModel, GenerationMixin):
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
+            output_hidden_states=True,
             output_router_logits=output_router_logits,
             return_dict=return_dict,
             cache_position=cache_position,
         )
 
-        hidden_states = outputs[0]
-        logits = self.lm_head(hidden_states)
-        logits = logits / self.config.logits_scaling
+        early_exit_layers = list(range(self.model.config.num_hidden_layers+1))
+        if early_exit_layers is not None:
+            logits_dict = {}
+            # value_dict = {}
+            for i, early_exit_layer in enumerate(early_exit_layers):
+                logits = self.lm_head(outputs.hidden_states[early_exit_layer])
+                logits = logits.float()
+                logits_dict[early_exit_layer] = logits
 
-        loss = None
-        if labels is not None:
-            # Upcast to float if we need to compute the loss to avoid potential precision issues
-            logits = logits.float()
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            # Enable model parallelism
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
-
-        aux_loss = None
-        if output_router_logits:
-            aux_loss = load_balancing_loss_func(
-                outputs.router_logits if return_dict else outputs[-1],
-                self.num_experts,
-                self.num_experts_per_tok,
-                attention_mask,
-            )
+            loss = None
             if labels is not None:
-                loss += self.router_aux_loss_coef * aux_loss.to(loss.device)  # make sure to reside in the same device
+                # Shift so that tokens < n predict n
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+                # Flatten the tokens
+                loss_fct = CrossEntropyLoss()
+                shift_logits = shift_logits.view(-1, self.config.vocab_size)
+                shift_labels = shift_labels.view(-1)
+                # Enable model parallelism
+                shift_labels = shift_labels.to(shift_logits.device)
+                loss = loss_fct(shift_logits, shift_labels)
+                    # loss_dict[early_exit_layer] = loss
+                
+            final_outputs = CausalLMOutputWithPast(
+                loss=loss,
+                logits=logits,
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.hidden_states,
+                attentions=outputs.attentions,
+            )
 
-        if not return_dict:
-            output = (logits,) + outputs[1:]
+            return logits_dict, final_outputs
+
+        else:
+            hidden_states = outputs[0]
+            logits = self.lm_head(hidden_states)
+            logits = logits / self.config.logits_scaling
+
+            loss = None
+            if labels is not None:
+                # Upcast to float if we need to compute the loss to avoid potential precision issues
+                logits = logits.float()
+                # Shift so that tokens < n predict n
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+                # Flatten the tokens
+                loss_fct = CrossEntropyLoss()
+                shift_logits = shift_logits.view(-1, self.config.vocab_size)
+                shift_labels = shift_labels.view(-1)
+                # Enable model parallelism
+                shift_labels = shift_labels.to(shift_logits.device)
+                loss = loss_fct(shift_logits, shift_labels)
+
+            aux_loss = None
             if output_router_logits:
-                output = (aux_loss,) + output
-            return (loss,) + output if loss is not None else output
+                aux_loss = load_balancing_loss_func(
+                    outputs.router_logits if return_dict else outputs[-1],
+                    self.num_experts,
+                    self.num_experts_per_tok,
+                    attention_mask,
+                )
+                if labels is not None:
+                    loss += self.router_aux_loss_coef * aux_loss.to(loss.device)  # make sure to reside in the same device
 
-        return MoeCausalLMOutputWithPast(
-            loss=loss,
-            aux_loss=aux_loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-            router_logits=outputs.router_logits,
-        )
+            if not return_dict:
+                output = (logits,) + outputs[1:]
+                if output_router_logits:
+                    output = (aux_loss,) + output
+                return (loss,) + output if loss is not None else output
+
+            return MoeCausalLMOutputWithPast(
+                loss=loss,
+                aux_loss=aux_loss,
+                logits=logits,
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.hidden_states,
+                attentions=outputs.attentions,
+                router_logits=outputs.router_logits,
+            )
 
     @staticmethod
     def _reorder_cache(past_key_values, beam_idx):

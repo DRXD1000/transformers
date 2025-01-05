@@ -1121,6 +1121,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
+        early_exit_layers: list[int] | None = None,
         **kwargs: Unpack[KwargsForCausalLM],
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
@@ -1160,7 +1161,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        outputs = self.model(
+        outputs, hidden_scores_fwd_up, hidden_scores_fwd_down, hidden_score_q, hidden_score_k, hidden_score_v, hidden_score_o = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1168,21 +1169,61 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            output_hidden_states=True,
+            output_hidden_states=output_hidden_states or early_exit_layers is not None,
             return_dict=return_dict,
             cache_position=cache_position,
-            **kwargs,
+            early_exit_layers=early_exit_layers,
         )
         
-        early_exit_layers = list(range(self.model.config.num_hidden_layers+1))#[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30]
-
         if early_exit_layers is not None:
+            summed_data_fwd = {key: sum(value) for key, value in hidden_scores_fwd_up.items()}
+            sorted(summed_data_fwd.items(), key=lambda item: item[1])
+            summed_data_q = {key: sum(value) for key, value in hidden_score_q.items()}
+            sorted(summed_data_q.items(), key=lambda item: item[1])
+            summed_data_k = {key: sum(value) for key, value in hidden_score_k.items()}
+            sorted(summed_data_k.items(), key=lambda item: item[1])
+            summed_data_v = {key: sum(value) for key, value in hidden_score_v.items()}
+            sorted(summed_data_v.items(), key=lambda item: item[1])
+            summed_data_o = {key: sum(value) for key, value in hidden_score_o.items()}
+            sorted(summed_data_o.items(), key=lambda item: item[1])
+
+            combined_data = {key: summed_data_fwd[key] * 3 + summed_data_q[key] * 2 + summed_data_v[key] * 2 for key in summed_data_fwd}
+
+            # pdb.set_trace()
+
             logits_dict = {}
-            # value_dict = {}
-            for i, early_exit_layer in enumerate(early_exit_layers):
+            activate_keys_fwd_up = {}
+            activate_keys_fwd_down = {}
+            activate_keys_q = {}
+            activate_keys_k = {}
+            activate_keys_v = {}
+            activate_keys_o = {}
+            for _i, early_exit_layer in enumerate(early_exit_layers):
                 logits = self.lm_head(outputs.hidden_states[early_exit_layer])
-                logits = logits.float()
                 logits_dict[early_exit_layer] = logits
+                top_number_attn = 2000
+                top_number_ffn = 12000
+                top_number_layer = 10
+                # pdb.set_trace()
+                # top_indices = operator.itemgetter(*(np.argsort(hidden_scores_fwd_up[early_exit_layer])[-top_number:][::-1]).tolist())(hidden_scores_fwd_up[early_exit_layer])
+                top_indices = np.argsort(hidden_scores_fwd_up[early_exit_layer])[-top_number_ffn:][::-1]
+                activate_keys_fwd_up[early_exit_layer] = top_indices
+                # top_indices = operator.itemgetter(*(np.argsort(hidden_scores_fwd_down[early_exit_layer])[-top_number:][::-1]).tolist())(hidden_scores_fwd_down[early_exit_layer])
+                top_indices = np.argsort(hidden_scores_fwd_down[early_exit_layer])[-top_number_ffn:][::-1]
+                activate_keys_fwd_down[early_exit_layer] = top_indices
+                # top_indices = operator.itemgetter(*(np.argsort(hidden_score_q[early_exit_layer])[-top_number:][::-1]).tolist())(hidden_score_q[early_exit_layer])
+                top_indices = np.argsort(hidden_score_q[early_exit_layer])[-top_number_attn:][::-1]
+                activate_keys_q[early_exit_layer] = top_indices
+                # top_indices = operator.itemgetter(*(np.argsort(hidden_score_k[early_exit_layer])[-top_number:][::-1]).tolist())(hidden_score_k[early_exit_layer])
+                top_indices = np.argsort(hidden_score_k[early_exit_layer])[-top_number_attn:][::-1]
+                activate_keys_k[early_exit_layer] = top_indices
+                # top_indices = operator.itemgetter(*(np.argsort(hidden_score_v[early_exit_layer])[-top_number:][::-1]).tolist())(hidden_score_v[early_exit_layer])
+                top_indices = np.argsort(hidden_score_v[early_exit_layer])[-top_number_attn:][::-1]
+                activate_keys_v[early_exit_layer] = top_indices
+                top_indices = np.argsort(hidden_score_o[early_exit_layer])[-top_number_attn:][::-1]
+                activate_keys_o[early_exit_layer] = top_indices
+                sorted_items = sorted(combined_data.items(), key=lambda item: item[1])
+                no_use_layer_index = [item[0] for item in sorted_items[-top_number_layer:]]
 
             loss = None
             if labels is not None:
@@ -1196,8 +1237,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
                 # Enable model parallelism
                 shift_labels = shift_labels.to(shift_logits.device)
                 loss = loss_fct(shift_logits, shift_labels)
-                    # loss_dict[early_exit_layer] = loss
-                
+                # loss_dict[early_exit_layer] = loss
+
             final_outputs = CausalLMOutputWithPast(
                 loss=loss,
                 logits=logits,
@@ -1206,7 +1247,19 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
                 attentions=outputs.attentions,
             )
 
-            return logits_dict, final_outputs
+            # pdb.set_trace()
+
+            return (
+                logits_dict,
+                final_outputs,
+                activate_keys_fwd_up,
+                activate_keys_fwd_down,
+                activate_keys_q,
+                activate_keys_k,
+                activate_keys_v,
+                activate_keys_o,
+                no_use_layer_index,
+            )
 
         else:
             hidden_states = outputs[0]

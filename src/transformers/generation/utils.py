@@ -3161,6 +3161,7 @@ class GenerationMixin:
     def _sample(
         self,
         input_ids: torch.LongTensor,
+        candidate_premature_layers: list[int] | None = None,
         logits_processor: LogitsProcessorList,
         stopping_criteria: StoppingCriteriaList,
         generation_config: GenerationConfig,
@@ -3253,10 +3254,22 @@ class GenerationMixin:
             model_inputs.update({"output_hidden_states": output_hidden_states} if output_hidden_states else {})
 
             if is_prefill:
-                logits_dict, outputs = self(**model_inputs, return_dict=True)
+                logits_dict, outputs, activate_keys_fwd_up, activate_keys_fwd_down, activate_keys_q, activate_keys_k, activate_keys_v, activate_keys_o, layer_keys = self(
+                **model_inputs,
+                return_dict=True,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                early_exit_layers=early_exit_layers,
+            )
                 is_prefill = False
             else:
-                logits_dict, outputs = model_forward(**model_inputs, return_dict=True)
+                logits_dict, outputs, activate_keys_fwd_up, activate_keys_fwd_down, activate_keys_q, activate_keys_k, activate_keys_v, activate_keys_o, layer_keys = model_forward(
+                    **model_inputs,
+                    return_dict=True,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    early_exit_layers=early_exit_layers,
+                )
 
             # synced_gpus: don't waste resources running the code we don't need; kwargs must be updated before skipping
             model_kwargs = self._update_model_kwargs_for_generation(
@@ -3362,7 +3375,17 @@ class GenerationMixin:
                     past_key_values=model_kwargs.get("past_key_values"),
                 )
         else:
-            return hidden_token_cont, input_ids
+            return (
+                hidden_token_cont,
+                input_ids,
+                activate_keys_fwd_up,
+                activate_keys_fwd_down,
+                activate_keys_q,
+                activate_keys_k,
+                activate_keys_v,
+                activate_keys_o,
+                layer_keys,
+            )
 
     def _temporary_reorder_cache(self, past_key_values, beam_idx):
         """

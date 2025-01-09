@@ -3161,12 +3161,13 @@ class GenerationMixin:
     def _sample(
         self,
         input_ids: torch.LongTensor,
-        candidate_premature_layers: list[int] | None = None,
+
         logits_processor: LogitsProcessorList,
         stopping_criteria: StoppingCriteriaList,
         generation_config: GenerationConfig,
         synced_gpus: bool,
         streamer: Optional["BaseStreamer"],
+        candidate_premature_layers: list[int] | None = None,
         **model_kwargs,
     ) -> Union[GenerateNonBeamOutput, torch.LongTensor]:
         r"""
@@ -3248,7 +3249,8 @@ class GenerationMixin:
         ):
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
-
+            if candidate_premature_layers is not None:
+                early_exit_layers = candidate_premature_layers
             # prepare variable output controls (note: some models won't accept all output controls)
             model_inputs.update({"output_attentions": output_attentions} if output_attentions else {})
             model_inputs.update({"output_hidden_states": output_hidden_states} if output_hidden_states else {})
@@ -3308,7 +3310,7 @@ class GenerationMixin:
                         else (outputs.hidden_states,)
                     )
 
-            early_exit_layers = list(range(self.model.config.num_hidden_layers+1))#[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30]
+            early_exit_layers = list(range(self.model.config.num_hidden_layers))#[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30]
 
             if len(hidden_token_cont) == 0:
                 for i, early_exit_layer in enumerate(early_exit_layers):

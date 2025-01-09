@@ -19,10 +19,11 @@
 # limitations under the License.
 import math
 from typing import List, Optional, Tuple, Union
-
+import numpy as np
 import torch
 import torch.utils.checkpoint
 from torch import nn
+from loguru import logger
 
 from ...activations import ACT2FN
 from ...cache_utils import Cache, DynamicCache, StaticCache
@@ -227,7 +228,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     return q_embed, k_embed
 
 
-class LlamaMLP(nn.Module):
+class LlamaMLP(nn.Module): #done
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -238,10 +239,14 @@ class LlamaMLP(nn.Module):
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
         self.act_fn = ACT2FN[config.hidden_act]
 
-    def forward(self, x):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        return down_proj
+    def forward(self, x, early_layers):
+        #down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        real_output = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        if early_layers:
+            return real_output, torch.sum(torch.abs(self.up_proj(x)), dim=1).squeeze().tolist(), torch.sum(torch.abs(self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))), dim=1).squeeze().tolist()
 
+        else:
+            return real_output, [], []
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
@@ -255,7 +260,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
-class LlamaAttention(nn.Module):
+class LlamaAttention(nn.Module): #DONE
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(self, config: LlamaConfig, layer_idx: Optional[int] = None):
@@ -297,6 +302,7 @@ class LlamaAttention(nn.Module):
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        early_layers: bool = False,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
@@ -331,14 +337,29 @@ class LlamaAttention(nn.Module):
         value_states = repeat_kv(value_states, self.num_key_value_groups)
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
+        #NEW ###
+        attn_weights_temp = torch.matmul(query_states.transpose(2, 3).unsqueeze(-1), key_states.transpose(2, 3).unsqueeze(-1).transpose(-2, -1))
+        #### 
+
         if attention_mask is not None:  # no matter the length, we just slice it
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
             attn_weights = attn_weights + causal_mask
+
+        #NEW ###
+        attn_weights_temp = attn_weights.unsqueeze(2).expand(-1, -1, query_states.size()[-1], -1, -1) - attn_weights_temp
+        attn_weights_temp = nn.functional.softmax(attn_weights_temp, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        ####
 
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
         attn_output = torch.matmul(attn_weights, value_states)
+
+        #NEW ###
+        attn_weights_temp = attn_weights_temp - attn_weights.unsqueeze(2).expand(-1, -1, query_states.size()[-1], -1, -1)
+        attn_weights_temp = attn_weights_temp**2
+        attn_weights_temp = attn_weights_temp.sum(dim=(-2, -1)).view(-1)
+        ####
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
@@ -347,15 +368,27 @@ class LlamaAttention(nn.Module):
             )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
+        # NEW:
+        attn_output_temp = attn_output.reshape(bsz, q_len, self.hidden_size)
+        ###
 
         attn_output = attn_output.reshape(bsz, q_len, -1)
+
+        attn_output_o = attn_output
 
         attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
             attn_weights = None
 
-        return attn_output, attn_weights, past_key_value
+
+        if early_layers:
+            logger.warning_once("attention using early layers")
+            return attn_output, attn_weights, past_key_value, attn_weights_temp.squeeze().tolist(), attn_weights_temp.squeeze().tolist(), torch.sum(torch.abs(attn_output_temp), dim=1).squeeze().tolist(), torch.sum(torch.abs(attn_output_o), dim=1).squeeze().tolist()
+            
+        else:
+            logger.warning_once("using normal layers", early_layers)
+            return attn_output, attn_weights, past_key_value, [], [], []
 
 
 class LlamaFlashAttention2(LlamaAttention):
@@ -608,6 +641,7 @@ class LlamaDecoderLayer(nn.Module):
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        early_layers: bool = False,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
@@ -637,7 +671,7 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        hidden_states, self_attn_weights, present_key_value, hidden_score_q, hidden_score_k, hidden_score_v, hidden_score_o = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -646,6 +680,7 @@ class LlamaDecoderLayer(nn.Module):
             use_cache=use_cache,
             cache_position=cache_position,
             position_embeddings=position_embeddings,
+            early_layers=early_layers, #NEW
             **kwargs,
         )
         hidden_states = residual + hidden_states
@@ -653,7 +688,7 @@ class LlamaDecoderLayer(nn.Module):
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states, hidden_score_fwd_up, hidden_score_fwd_down = self.mlp(hidden_states, early_layers)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -664,7 +699,7 @@ class LlamaDecoderLayer(nn.Module):
         if use_cache:
             outputs += (present_key_value,)
 
-        return outputs
+        return outputs, hidden_score_fwd_up, hidden_score_fwd_down, hidden_score_q, hidden_score_k, hidden_score_v, hidden_score_o
 
 
 LLAMA_START_DOCSTRING = r"""
@@ -837,6 +872,7 @@ class LlamaModel(LlamaPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        early_exit_layers: list[int] | None = None, #NEW
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -893,9 +929,22 @@ class LlamaModel(LlamaPreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+        hidden_scores_fwd_up = {}
+        hidden_scores_fwd_down = {}
+        hidden_scores_q = {}
+        hidden_scores_k = {}
+        hidden_scores_v = {}
+        hidden_scores_o = {}
+
+        for idx, decoder_layer in enumerate(self.layers):
+            early_layers_flag = idx in early_exit_layers
+
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
+
+        # for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+        #     if output_hidden_states:
+        #         all_hidden_states += (hidden_states,)
 
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
@@ -910,7 +959,7 @@ class LlamaModel(LlamaPreTrainedModel):
                     position_embeddings,
                 )
             else:
-                layer_outputs = decoder_layer(
+                layer_outputs, hidden_score_fwd_up, hidden_score_fwd_down, hidden_score_q, hidden_score_k, hidden_score_v, hidden_score_o = decoder_layer(
                     hidden_states,
                     attention_mask=causal_mask,
                     position_ids=position_ids,
@@ -919,8 +968,19 @@ class LlamaModel(LlamaPreTrainedModel):
                     use_cache=use_cache,
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
+                    early_layers=early_layers_flag,
                     **flash_attn_kwargs,
                 )
+
+
+            if early_layers_flag:
+                hidden_scores_fwd_up[idx] = hidden_score_fwd_up
+                hidden_scores_fwd_down[idx] = hidden_score_fwd_down
+                hidden_scores_q[idx] = hidden_score_q
+                hidden_scores_k[idx] = hidden_score_k
+                hidden_scores_v[idx] = hidden_score_v
+                hidden_scores_o[idx] = hidden_score_o
+
 
             hidden_states = layer_outputs[0]
 
@@ -942,11 +1002,19 @@ class LlamaModel(LlamaPreTrainedModel):
 
         if not return_dict:
             return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
-        return BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
-            past_key_values=next_cache,
-            hidden_states=all_hidden_states,
-            attentions=all_self_attns,
+        return (
+            BaseModelOutputWithPast(
+                last_hidden_state=hidden_states,
+                past_key_values=next_cache,
+                hidden_states=all_hidden_states,
+                attentions=all_self_attns,
+            ),
+            hidden_scores_fwd_up,
+            hidden_scores_fwd_down,
+            hidden_scores_q,
+            hidden_scores_k,
+            hidden_scores_v,
+            hidden_scores_o,
         )
 
     def _update_causal_mask(
@@ -1174,6 +1242,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             cache_position=cache_position,
             early_exit_layers=early_exit_layers,
         )
+        #early_exit_layers = list(range(self.model.config.num_hidden_layers))
         
         if early_exit_layers is not None:
             summed_data_fwd = {key: sum(value) for key, value in hidden_scores_fwd_up.items()}
@@ -1204,6 +1273,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
                 top_number_attn = 2000
                 top_number_ffn = 12000
                 top_number_layer = 10
+                logger.warning_once(len(hidden_scores_fwd_up))
                 # pdb.set_trace()
                 # top_indices = operator.itemgetter(*(np.argsort(hidden_scores_fwd_up[early_exit_layer])[-top_number:][::-1]).tolist())(hidden_scores_fwd_up[early_exit_layer])
                 top_indices = np.argsort(hidden_scores_fwd_up[early_exit_layer])[-top_number_ffn:][::-1]

@@ -1465,6 +1465,7 @@ class GenerationMixin:
         elif (
             model_input_name == "inputs_embeds"
             and input_ids_length != inputs_tensor.shape[1]
+            and input_ids_length != 0
             and not self.config.is_encoder_decoder
         ):
             generation_config.max_length -= inputs_tensor.shape[1]
@@ -1633,17 +1634,18 @@ class GenerationMixin:
                     cache_dtype = self.get_output_embeddings().weight.dtype
 
             def get_layer_device_map(execution_device_map: Optional[dict] = None):
+                num_hidden_layers = self.config.get_text_config().num_hidden_layers
                 if execution_device_map is None:
                     return None
                 elif len(execution_device_map) == 1 and "" in execution_device_map:
-                    return {idx: execution_device_map[""] for idx in range(self.config.num_hidden_layers)}
+                    return {idx: execution_device_map[""] for idx in range(num_hidden_layers)}
                 layer_device_map = {}
                 for layer in execution_device_map:
-                    for idx in range(self.config.num_hidden_layers):
+                    for idx in range(num_hidden_layers):
                         if f".{idx}." in f"{layer}.":
                             layer_device_map[idx] = execution_device_map[layer]
                             break
-                for idx in range(self.config.num_hidden_layers):
+                for idx in range(num_hidden_layers):
                     if idx not in layer_device_map:
                         raise RuntimeError(f"layer {idx} has not been mapped to a device.")
                 return layer_device_map
@@ -1692,6 +1694,7 @@ class GenerationMixin:
             self._supports_cache_class
             and "jamba" not in self.__class__.__name__.lower()
             and "zamba" not in self.__class__.__name__.lower()
+            and "bamba" not in self.__class__.__name__.lower()
         )
 
     def _prepare_cache_for_generation(
@@ -1905,7 +1908,6 @@ class GenerationMixin:
     def generate(
         self,
         inputs: Optional[torch.Tensor] = None,
-        candidate_premature_layers: Optional[List[int]] = None,
         generation_config: Optional[GenerationConfig] = None,
         logits_processor: Optional[LogitsProcessorList] = None,
         stopping_criteria: Optional[StoppingCriteriaList] = None,
@@ -2257,7 +2259,6 @@ class GenerationMixin:
                 generation_config=generation_config,
                 synced_gpus=synced_gpus,
                 streamer=streamer,
-                candidate_premature_layers=candidate_premature_layers,
                 **model_kwargs,
             )
 
@@ -3229,9 +3230,6 @@ class GenerationMixin:
         batch_size, cur_len = input_ids.shape
         this_peer_finished = False
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
-
-        hidden_token_cont = {}
-
         model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
 
         model_forward = self.__call__
@@ -3253,10 +3251,10 @@ class GenerationMixin:
             model_inputs.update({"output_hidden_states": output_hidden_states} if output_hidden_states else {})
 
             if is_prefill:
-                logits_dict, outputs = self(**model_inputs, return_dict=True)
+                outputs = self(**model_inputs, return_dict=True)
                 is_prefill = False
             else:
-                logits_dict, outputs = model_forward(**model_inputs, return_dict=True)
+                outputs = model_forward(**model_inputs, return_dict=True)
 
             # synced_gpus: don't waste resources running the code we don't need; kwargs must be updated before skipping
             model_kwargs = self._update_model_kwargs_for_generation(
@@ -3294,22 +3292,6 @@ class GenerationMixin:
                         if self.config.is_encoder_decoder
                         else (outputs.hidden_states,)
                     )
-
-            early_exit_layers = list(range(self.model.config.num_hidden_layers+1))#[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30]
-
-            if len(hidden_token_cont) == 0:
-                for i, early_exit_layer in enumerate(early_exit_layers):
-                    logit = logits_dict[early_exit_layer]
-                    # hidden_token_cont[early_exit_layer] = torch.argmax(logit, dim=-1)
-                    topk_values, topk_indices = torch.topk(logit, 10, dim=-1)
-                    hidden_token_cont[early_exit_layer] = topk_indices.view(*topk_indices.shape[:-2], -1)
-            else:
-                for i, early_exit_layer in enumerate(early_exit_layers):
-                    logit = logits_dict[early_exit_layer]
-                    # hidden_token_cont[early_exit_layer] = torch.cat([hidden_token_cont[early_exit_layer], torch.argmax(logit, dim=-1)], dim=-1)
-                    topk_values, topk_indices = torch.topk(logit, 10, dim=-1)
-                    hidden_token_cont[early_exit_layer] = torch.cat([hidden_token_cont[early_exit_layer], topk_indices.view(*topk_indices.shape[:-2], -1)], dim=-1)
-
 
             # token selection
             if do_sample:
@@ -3362,7 +3344,7 @@ class GenerationMixin:
                     past_key_values=model_kwargs.get("past_key_values"),
                 )
         else:
-            return hidden_token_cont, input_ids
+            return input_ids
 
     def _temporary_reorder_cache(self, past_key_values, beam_idx):
         """
@@ -4280,9 +4262,10 @@ class GenerationMixin:
         while self._has_unfinished_sequences(this_peer_finished, synced_gpus, device=input_ids.device):
             cur_len = input_ids.shape[-1]
 
-            #  1. Fetch candidate sequences from a `CandidateGenerator`
+            #  1. Fetch candidate sequences from a `CandidateGenerator` and move to the correct device
             candidate_input_ids, candidate_logits = candidate_generator.get_candidates(input_ids)
 
+            candidate_input_ids = candidate_input_ids.to(self.device)
             if candidate_logits is not None:
                 candidate_logits = candidate_logits.to(self.device)
 

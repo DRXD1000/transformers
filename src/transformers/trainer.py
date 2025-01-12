@@ -425,6 +425,7 @@ class Trainer:
         optimizers: Tuple[Optional[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LambdaLR]] = (None, None),
         optimizer_cls_and_kwargs: Optional[Tuple[Type[torch.optim.Optimizer], Dict[str, Any]]] = None,
         preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
+        activate_neurons: Optional[list]  = None,
     ):
         if args is None:
             output_dir = "tmp_trainer"
@@ -2580,6 +2581,68 @@ class Trainer:
                                 grad_norm = _grad_norm
 
                         self.control = self.callback_handler.on_pre_optimizer_step(args, self.state, self.control)
+
+                                                index_keys = list(range(24))
+                        index_keys_under = list(range(8))
+                        index_keys_gen = [23 - i for i in range(4)]
+                        index_keys_reason = [item for item in index_keys if item not in index_keys_under and item not in index_keys_gen]
+
+                        activate_fwd_up = activate_neuron[0]
+                        activate_fwd_down = activate_neuron[1]
+                        attn_q = activate_neuron[2]
+                        attn_k = activate_neuron[3]
+                        attn_v = activate_neuron[4]
+
+                        attn_k = {key: {num // 4 for num in value} for key, value in attn_k.items()}
+                        attn_v = {key: {num // 4 for num in value} for key, value in attn_v.items()}
+
+                        for idx in index_keys:
+                            if idx in index_keys_under or idx in index_keys_reason or idx in index_keys_gen:
+                                activate_fwd_up[idx] = set(itertools.islice(activate_fwd_up[idx], 100))
+                                activate_fwd_down[idx] = set(itertools.islice(activate_fwd_down[idx], 100))
+                                attn_q[idx] = set(itertools.islice(attn_q[idx], 100))
+                                attn_k[idx] = set(itertools.islice(attn_k[idx], 100))
+                                attn_v[idx] = set(itertools.islice(attn_v[idx], 100))
+                            else:
+                                activate_fwd_up[idx] = []
+                                activate_fwd_down[idx] = []
+                                attn_q[idx] = []
+                                attn_k[idx] = []
+                                attn_v[idx] = []
+
+                        for name, param in model.named_parameters():
+                            match = re.search(r"layers\.(\d+)\.", name)
+                            if match:
+                                layer = int(match.group(1))
+                                if "attn.q_proj" in name:
+                                    tune_index = attn_q[layer]
+                                    mask = torch.ones(param.size(0), dtype=torch.bool)
+                                    mask[list(tune_index)] = False
+                                    param.grad[mask] = 0
+                                elif "attn.k_proj" in name:
+                                    tune_index = attn_k[layer]
+                                    mask = torch.ones(param.size(0), dtype=torch.bool)
+                                    mask[list(tune_index)] = False
+                                    param.grad[mask] = 0
+                                elif "attn.v_proj" in name:
+                                    tune_index = attn_v[layer]
+                                    mask = torch.ones(param.size(0), dtype=torch.bool)
+                                    mask[list(tune_index)] = False
+                                    param.grad[mask] = 0
+                                elif "up_proj" in name:
+                                    tune_index = activate_fwd_up[layer]
+                                    mask = torch.ones(param.size(0), dtype=torch.bool)
+                                    mask[list(tune_index)] = False
+                                    param.grad[mask] = 0
+                                elif "down_proj" in name:
+                                    tune_index = activate_fwd_down[layer]
+                                    mask = torch.ones(param.size(1), dtype=torch.bool)
+                                    mask[list(tune_index)] = False
+                                    param.grad.T[mask] = 0
+                                else:
+                                    param.grad.zero_()
+                            else:
+                                param.grad.zero_()
 
                         self.optimizer.step()
 

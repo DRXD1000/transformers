@@ -427,6 +427,7 @@ class Trainer:
         optimizer_cls_and_kwargs: Optional[Tuple[Type[torch.optim.Optimizer], Dict[str, Any]]] = None,
         preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
         activate_neuron: Optional[list]  = None,
+        index_dict: Optional[dict] = None,
     ):
         
         if args is None:
@@ -455,6 +456,7 @@ class Trainer:
         # Seed must be set before instantiating the model when using model
         enable_full_determinism(self.args.seed) if self.args.full_determinism else set_seed(self.args.seed)
         self.activate_neuron = activate_neuron
+        self.index_dict = index_dict
         self.hp_name = None
         self.deepspeed = None
         self.is_in_train = False
@@ -2585,12 +2587,17 @@ class Trainer:
 
                         self.control = self.callback_handler.on_pre_optimizer_step(args, self.state, self.control)
 
-                        index_keys = list(range(28))
-                        index_keys_under = list(range(4))
-                        index_keys_gen = [28 - i for i in range(7)]
-                        index_keys_reason = [item for item in index_keys if item not in index_keys_under and item not in index_keys_gen]
+                        # index_keys = list(range(28))
+                        # index_keys_under = list(range(4))
+                        # index_keys_gen = [28 - i for i in range(7)]
+                        # index_keys_reason = [item for item in index_keys if item not in index_keys_under and item not in index_keys_gen]
 
                         activate_neuron = self.activate_neuron
+
+                        index_keys = self.index_dict["index_keys"]
+                        index_keys_under = self.index_dict["index_keys_under"]
+                        index_keys_reason = self.index_dict["index_keys_reason"]
+                        index_keys_gen = self.index_dict["index_keys_gen"]
 
                         activate_fwd_up = activate_neuron[0]
                         activate_fwd_down = activate_neuron[1]

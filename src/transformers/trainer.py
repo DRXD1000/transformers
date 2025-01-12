@@ -17,6 +17,7 @@ The Trainer class, to easily train a 🤗 Transformers from scratch or finetune 
 """
 
 import contextlib
+import itertools
 import copy
 import functools
 import glob
@@ -425,8 +426,9 @@ class Trainer:
         optimizers: Tuple[Optional[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LambdaLR]] = (None, None),
         optimizer_cls_and_kwargs: Optional[Tuple[Type[torch.optim.Optimizer], Dict[str, Any]]] = None,
         preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
-        activate_neurons: Optional[list]  = None,
+        activate_neuron: Optional[list]  = None,
     ):
+        
         if args is None:
             output_dir = "tmp_trainer"
             logger.info(f"No `TrainingArguments` passed, using `output_dir={output_dir}`.")
@@ -452,7 +454,7 @@ class Trainer:
         self.compute_loss_func = compute_loss_func
         # Seed must be set before instantiating the model when using model
         enable_full_determinism(self.args.seed) if self.args.full_determinism else set_seed(self.args.seed)
-
+        self.activate_neuron = activate_neuron
         self.hp_name = None
         self.deepspeed = None
         self.is_in_train = False
@@ -2177,8 +2179,9 @@ class Trainer:
             )
 
     def _inner_training_loop(
-        self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
-    ):
+        self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None,
+):
+
         self.accelerator.free_memory()
         self._train_batch_size = batch_size
         if self.args.auto_find_batch_size:
@@ -2582,10 +2585,12 @@ class Trainer:
 
                         self.control = self.callback_handler.on_pre_optimizer_step(args, self.state, self.control)
 
-                                                index_keys = list(range(24))
-                        index_keys_under = list(range(8))
-                        index_keys_gen = [23 - i for i in range(4)]
+                        index_keys = list(range(28))
+                        index_keys_under = list(range(4))
+                        index_keys_gen = [28 - i for i in range(7)]
                         index_keys_reason = [item for item in index_keys if item not in index_keys_under and item not in index_keys_gen]
+
+                        activate_neuron = self.activate_neuron
 
                         activate_fwd_up = activate_neuron[0]
                         activate_fwd_down = activate_neuron[1]

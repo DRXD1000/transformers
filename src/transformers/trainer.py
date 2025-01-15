@@ -2609,7 +2609,7 @@ class Trainer:
                         attn_v = {key: {num // 4 for num in value} for key, value in attn_v.items()}
 
                         for idx in index_keys:
-                            if idx in index_keys_under or idx in index_keys_reason or idx in index_keys_gen:
+                            if idx in index_keys_under or idx in index_keys_gen:
                                 activate_fwd_up[idx] = set(itertools.islice(activate_fwd_up[idx], 100))
                                 activate_fwd_down[idx] = set(itertools.islice(activate_fwd_down[idx], 100))
                                 attn_q[idx] = set(itertools.islice(attn_q[idx], 100))
